@@ -16,6 +16,12 @@ import random
 import csv
 import datetime
 from dataclasses import dataclass
+try:
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+    HAS_OPENPYXL = True
+except ImportError:
+    HAS_OPENPYXL = False
 from typing import List, Tuple, Optional
 
 
@@ -36,7 +42,7 @@ DENSITY_WATER = 0.998     # g/mL at ~20–25 °C
 ATM_PER_MMHG = 1.0 / 760.0
 STANDARD_PRESSURE_MBAR = 1013.25  # standard atmospheric pressure in mbar
 
-AVAILABLE_VESSELS_ML = [20, 50, 100, 250, 500, 1000, 2000]
+AVAILABLE_VESSELS_ML = [10, 20, 100, 250, 500, 1000, 2000]
 
 
 def antoine_vapor_pressure_mmhg(t_celsius: float) -> float:
@@ -182,9 +188,12 @@ def find_best_combination(
 
     Scoring (lower is better):
       primary   = |actual − target|  (closeness to the desired value)
-      secondary = injection volume   (prefer less injection; 1 syringe > 2)
+      secondary = prefer larger volumes (bigger syringe + bigger vessel)
 
-    The secondary term is scaled very small so it only breaks ties.
+    The secondary terms are scaled very small so they only break ties.
+    Among equally close combinations, the optimizer picks the one with
+    the larger injection volume and vessel (e.g. 1 mL in 2000 mL over
+    0.05 mL in 100 mL) for better reproducibility.
     """
     best: Optional[CalibrationPoint] = None
     best_score = float("inf")
@@ -204,9 +213,10 @@ def find_best_combination(
             # penalty — enough to prefer a larger vessel with one fill,
             # but allows two-step when no single injection across any
             # vessel can reasonably reach the target.
-            # Among single-injection combos, prefer less volume.
             step_penalty = 0.0 if inj <= 2.5 else 5.0
-            score = deviation + 0.001 * inj + step_penalty
+            # Among combos with similar deviation, prefer larger
+            # injection volume and larger vessel for practicality.
+            score = deviation - 0.001 * inj - 0.0001 * vessel + step_penalty
 
             if score < best_score:
                 best_score = score
@@ -321,8 +331,34 @@ def generate_run_sequence(
 # CSV Export
 # ──────────────────────────────────────────────────────────────────────────────
 
-def export_csv(
+def _build_metadata_rows(
+    t_celsius: float,
+    p_lab_mbar: float,
+    hs_conc: float,
+    hs_ppmv: float,
+    n_blocks: int,
+    analysis_time_s: float,
+    source_desc: str,
+    total_runs: int,
+) -> List[List[str]]:
+    """Return metadata rows shared by both export formats."""
+    total_time = total_runs * analysis_time_s
+    return [
+        ["Smart Static Headspace Calibration Designer"],
+        [f"Generated: {datetime.datetime.now():%Y-%m-%d %H:%M}"],
+        [f"Lab Temperature (°C): {t_celsius:.1f}"],
+        [f"Lab Pressure (mbar): {p_lab_mbar:.1f}"],
+        [f"Headspace Concentration: {hs_conc:.2f} mg/L  ({hs_ppmv:.0f} ppmv)"],
+        [f"Headspace Source: {source_desc}"],
+        [f"Number of Blocks: {n_blocks}"],
+        [f"Analysis Time per Run: {analysis_time_s:.0f} s"],
+        [f"Estimated Total Time: {format_time(total_time)}"],
+    ]
+
+
+def export_xlsx(
     filepath: str,
+    points: List[CalibrationPoint],
     entries: List[RunEntry],
     t_celsius: float,
     p_lab_mbar: float,
@@ -332,24 +368,139 @@ def export_csv(
     analysis_time_s: float,
     source_desc: str,
 ) -> None:
-    """Write the run sequence to a CSV file with a metadata header."""
-    total_time = len(entries) * analysis_time_s
+    """Write calibration standards and run sequence to separate Excel sheets."""
+    wb = Workbook()
+
+    meta_rows = _build_metadata_rows(
+        t_celsius, p_lab_mbar, hs_conc, hs_ppmv,
+        n_blocks, analysis_time_s, source_desc, len(entries))
+
+    # ── Styling ──
+    header_font = Font(name="Segoe UI", bold=True, size=11)
+    header_fill = PatternFill(start_color="4472C4", end_color="4472C4",
+                              fill_type="solid")
+    header_font_white = Font(name="Segoe UI", bold=True, size=11,
+                             color="FFFFFF")
+    meta_font = Font(name="Segoe UI", italic=True, size=10, color="555555")
+    data_font = Font(name="Consolas", size=10)
+    center = Alignment(horizontal="center", vertical="center")
+    thin_border = Border(
+        bottom=Side(style="thin", color="D9D9D9"),
+    )
+
+    def _write_meta(ws):
+        for r, row_data in enumerate(meta_rows, start=1):
+            cell = ws.cell(row=r, column=1, value=row_data[0])
+            cell.font = meta_font
+        return len(meta_rows) + 2  # next data row (with a blank row gap)
+
+    def _write_header(ws, row, headers, widths):
+        for c, (h, w) in enumerate(zip(headers, widths), start=1):
+            cell = ws.cell(row=row, column=c, value=h)
+            cell.font = header_font_white
+            cell.fill = header_fill
+            cell.alignment = center
+            ws.column_dimensions[
+                cell.column_letter].width = w
+
+    # ═══════════════════════════════════════════════════════
+    # Sheet 1 – Calibration Standards
+    # ═══════════════════════════════════════════════════════
+    ws_std = wb.active
+    ws_std.title = "Calibration Standards"
+    data_row = _write_meta(ws_std)
+
+    std_headers = ["Standard ID", "Target (mg/L)", "Actual (mg/L)",
+                   "Actual (ppmv)", "Injection (mL)", "Vessel (mL)"]
+    std_widths  = [13, 15, 15, 14, 22, 13]
+    _write_header(ws_std, data_row, std_headers, std_widths)
+
+    for i, pt in enumerate(points, start=1):
+        r = data_row + i
+        vals = [
+            pt.standard_id,
+            round(pt.target_conc, 2),
+            round(pt.actual_conc, 2),
+            round(pt.actual_ppmv, 1),
+            pt.injection_label,
+            pt.vessel_vol_ml if pt.vessel_vol_ml else "—",
+        ]
+        for c, v in enumerate(vals, start=1):
+            cell = ws_std.cell(row=r, column=c, value=v)
+            cell.font = data_font
+            cell.alignment = center
+            cell.border = thin_border
+
+    # ═══════════════════════════════════════════════════════
+    # Sheet 2 – Randomized Run Sequence
+    # ═══════════════════════════════════════════════════════
+    ws_seq = wb.create_sheet(title="Run Sequence")
+    data_row = _write_meta(ws_seq)
+
+    seq_headers = ["Run Order", "Block", "Standard ID", "Conc (mg/L)",
+                   "Conc (ppmv)", "Injection Action (mL)", "Vessel (mL)"]
+    seq_widths  = [12, 9, 13, 14, 13, 24, 13]
+    _write_header(ws_seq, data_row, seq_headers, seq_widths)
+
+    for i, e in enumerate(entries, start=1):
+        r = data_row + i
+        vals = [
+            e.run_order, e.block, e.standard_id,
+            round(e.final_conc, 2),
+            round(e.final_ppmv, 1),
+            e.injection_action,
+            e.vessel_volume if e.vessel_volume else "—",
+        ]
+        for c, v in enumerate(vals, start=1):
+            cell = ws_seq.cell(row=r, column=c, value=v)
+            cell.font = data_font
+            cell.alignment = center
+            cell.border = thin_border
+
+    wb.save(filepath)
+
+
+def export_csv(
+    filepath: str,
+    points: List[CalibrationPoint],
+    entries: List[RunEntry],
+    t_celsius: float,
+    p_lab_mbar: float,
+    hs_conc: float,
+    hs_ppmv: float,
+    n_blocks: int,
+    analysis_time_s: float,
+    source_desc: str,
+) -> None:
+    """Fallback: write both tables to a single CSV when openpyxl is absent."""
+    meta = _build_metadata_rows(
+        t_celsius, p_lab_mbar, hs_conc, hs_ppmv,
+        n_blocks, analysis_time_s, source_desc, len(entries))
+
     with open(filepath, "w", newline="", encoding="utf-8") as fh:
         writer = csv.writer(fh)
-        # ── Metadata header ──
-        writer.writerow(["# Smart Static Headspace Calibration Designer"])
-        writer.writerow([f"# Generated: {datetime.datetime.now():%Y-%m-%d %H:%M}"])
-        writer.writerow([f"# Lab Temperature (°C): {t_celsius:.1f}"])
-        writer.writerow([f"# Lab Pressure (mbar): {p_lab_mbar:.1f}"])
-        writer.writerow([f"# Headspace Concentration: {hs_conc:.2f} mg/L  "
-                         f"({hs_ppmv:.0f} ppmv)"])
-        writer.writerow([f"# Headspace Source: {source_desc}"])
-        writer.writerow([f"# Number of Blocks: {n_blocks}"])
-        writer.writerow([f"# Analysis Time per Run: {analysis_time_s:.0f} s"])
-        writer.writerow([f"# Estimated Total Time: {format_time(total_time)}"])
+        for row in meta:
+            writer.writerow([f"# {row[0]}"])
         writer.writerow([])
 
-        # ── Data ──
+        # ── Calibration Standards ──
+        writer.writerow(["## Calibration Standards"])
+        writer.writerow([
+            "Standard_ID", "Target_mg_L", "Actual_mg_L",
+            "Actual_ppmv", "Injection_mL", "Vessel_mL",
+        ])
+        for pt in points:
+            writer.writerow([
+                pt.standard_id,
+                f"{pt.target_conc:.2f}", f"{pt.actual_conc:.2f}",
+                f"{pt.actual_ppmv:.1f}",
+                pt.injection_label,
+                pt.vessel_vol_ml if pt.vessel_vol_ml else "—",
+            ])
+        writer.writerow([])
+
+        # ── Randomized Run Sequence ──
+        writer.writerow(["## Randomized Run Sequence"])
         writer.writerow([
             "Run_Order", "Block", "Standard_ID",
             "Final_Conc_mg_L", "Final_Conc_ppmv",
@@ -786,12 +937,13 @@ class CalibrationDesignerApp(tk.Tk):
             messagebox.showerror("Invalid Input", str(exc))
             return
 
-        # Compute mole fraction from purity
-        x_meoh = vol_percent_to_mole_fraction(purity)
+        # Always use pure methanol headspace (mole_fraction = 1.0).
+        # The purity field describes stock solution concentration, but
+        # the source vial headspace is that of pure (neat) methanol.
 
         # Design
         self._hs_conc, self._hs_ppmv, self._points = design_calibration(
-            t_c, targets, syr_res, p_lab_mbar=p_mbar, mole_fraction=x_meoh)
+            t_c, targets, syr_res, p_lab_mbar=p_mbar, mole_fraction=1.0)
 
         # Sequence (fresh randomization)
         self._entries = generate_run_sequence(self._points, n_blk)
@@ -871,21 +1023,35 @@ class CalibrationDesignerApp(tk.Tk):
         src_desc = self._get_source_description(
             t_c, p_mbar, purity, liq_vol, vial_vol)
 
+        if HAS_OPENPYXL:
+            ext, ftypes = ".xlsx", [("Excel Files", "*.xlsx"), ("All Files", "*.*")]
+            init_name = f"MeOH_Calibration_{t_c:.0f}C.xlsx"
+        else:
+            ext, ftypes = ".csv", [("CSV Files", "*.csv"), ("All Files", "*.*")]
+            init_name = f"MeOH_Calibration_{t_c:.0f}C.csv"
+
         filepath = filedialog.asksaveasfilename(
-            defaultextension=".csv",
-            filetypes=[("CSV Files", "*.csv"), ("All Files", "*.*")],
+            defaultextension=ext,
+            filetypes=ftypes,
             title="Export Calibration Sequence",
-            initialfile=f"MeOH_Calibration_{t_c:.0f}C.csv",
+            initialfile=init_name,
         )
         if not filepath:
             return
 
         try:
-            export_csv(filepath, self._entries, t_c, p_mbar,
-                       self._hs_conc, self._hs_ppmv, n_blk, a_time, src_desc)
+            if HAS_OPENPYXL and filepath.lower().endswith(".xlsx"):
+                export_xlsx(filepath, self._points, self._entries, t_c,
+                            p_mbar, self._hs_conc, self._hs_ppmv,
+                            n_blk, a_time, src_desc)
+            else:
+                export_csv(filepath, self._points, self._entries, t_c,
+                           p_mbar, self._hs_conc, self._hs_ppmv,
+                           n_blk, a_time, src_desc)
             self.lbl_status.config(text=f"✓  Exported to {filepath}")
             messagebox.showinfo("Export Successful",
-                                f"Saved {len(self._entries)} run entries to:\n"
+                                f"Saved {len(self._points)} standards + "
+                                f"{len(self._entries)} run entries to:\n"
                                 f"{filepath}")
         except OSError as exc:
             messagebox.showerror("Export Error", str(exc))
