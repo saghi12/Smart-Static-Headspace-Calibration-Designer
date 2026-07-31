@@ -82,9 +82,7 @@ Where $A = 8.08097$, $B = 1582.27$, $C = 239.7$
 
 $$ C_{hs} = \frac{P_{MeOH} \cdot M_{MeOH}}{R \cdot T_{K}} \times \left(\frac{P_{std}}{P_{lab}}\right) $$
 
-**3. Dilution Model**
 
-$$ C_{actual} = C_{hs} \times \left( \frac{V_{injection}}{V_{vessel}} \right) $$
 
 ---
 
