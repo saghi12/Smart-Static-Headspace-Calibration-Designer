@@ -34,6 +34,14 @@ ANTOINE_A = 8.08097
 ANTOINE_B = 1582.27
 ANTOINE_C = 239.7
 
+# Temperature range over which the NIST Antoine coefficients above were
+# fitted. Outside this window the equation still evaluates, but the
+# result is an extrapolation and should not be trusted for method
+# validation. The GUI accepts a wider entry range (-20 to 80 °C) for
+# flexibility, so callers must check this separately.
+ANTOINE_VALID_MIN_C = 15.0
+ANTOINE_VALID_MAX_C = 84.0
+
 R_GAS = 0.08206          # L·atm / (mol·K)
 MOLAR_MASS_MEOH = 32040  # mg/mol  (32.04 g/mol)
 MOLAR_MASS_WATER = 18015 # mg/mol  (18.015 g/mol)
@@ -937,6 +945,17 @@ class CalibrationDesignerApp(tk.Tk):
             messagebox.showerror("Invalid Input", str(exc))
             return
 
+        if not (ANTOINE_VALID_MIN_C <= t_c <= ANTOINE_VALID_MAX_C):
+            messagebox.showwarning(
+                "Temperature Outside Validated Range",
+                f"The Antoine coefficients used here are fitted for "
+                f"{ANTOINE_VALID_MIN_C:.0f}\u2013{ANTOINE_VALID_MAX_C:.0f} \u00b0C.\n\n"
+                f"You entered {t_c:.1f} \u00b0C, which is outside that range. "
+                f"The vapor pressure (and therefore the calculated "
+                f"concentrations) will be an extrapolation and may be "
+                f"less accurate.\n\nThe calculation will proceed anyway."
+            )
+
         # Always use pure methanol headspace (mole_fraction = 1.0).
         # The purity field describes stock solution concentration, but
         # the source vial headspace is that of pure (neat) methanol.
@@ -981,9 +1000,14 @@ class CalibrationDesignerApp(tk.Tk):
 
         self.btn_shuffle.config(state="normal")
         self.btn_export.config(state="normal")
-        self.lbl_status.config(
-            text=f"✓  {len(self._points)} standards designed, "
-                 f"{total_runs} runs generated.")
+        status_text = (f"✓  {len(self._points)} standards designed, "
+                       f"{total_runs} runs generated.")
+        if not (ANTOINE_VALID_MIN_C <= t_c <= ANTOINE_VALID_MAX_C):
+            status_text += (f"  ⚠ Temperature outside validated "
+                            f"{ANTOINE_VALID_MIN_C:.0f}\u2013"
+                            f"{ANTOINE_VALID_MAX_C:.0f} °C range "
+                            f"(extrapolated).")
+        self.lbl_status.config(text=status_text)
 
     def _on_shuffle(self):
         """Re-randomize the run sequence without recalculating standards."""
