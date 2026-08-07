@@ -82,6 +82,13 @@ Where $A = 8.08097$, $B = 1582.27$, $C = 239.7$
 
 $$ C_{hs} = \frac{P_{MeOH} \cdot M_{MeOH}}{R \cdot T_{K}} \times \left(\frac{P_{std}}{P_{lab}}\right) $$
 
+## Smart Optimization
+
+For each target concentration, the software evaluates all valid combinations of available headspace vessel sizes and syringe injection volumes. It calculates the concentration produced by each combination and selects the one that most closely matches the requested target.
+
+When multiple combinations provide similar accuracy, the algorithm prefers practical laboratory solutions by favoring single-step injections, larger injection volumes, and larger headspace vessels. If an injection volume exceeds 2.5 mL, it is automatically formatted as a two-step injection (e.g., 3.10 mL = 2.50 + 0.60 mL).
+
+This ensures that the generated calibration plan is both accurate and practical to prepare.
 
 
 ---
