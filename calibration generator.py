@@ -4,7 +4,7 @@ Smart Static Headspace Calibration Designer
 Generates Methanol gas standards for Drift Tube Ion Mobility Spectrometry (DT-IMS)
 using static headspace sampling with the Antoine equation and ideal gas law.
 
-Author : Generated for DT-IMS calibration workflow
+Author : Ali Ghiasi
 License: MIT
 Python : >= 3.8 (stdlib only – no pip packages required)
 """
